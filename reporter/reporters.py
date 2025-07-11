@@ -8,7 +8,7 @@ import csv
 import sys
 from pathlib import Path
 from abc import ABC, abstractmethod
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -176,6 +176,10 @@ class TextReporter(BaseReporter):
                 lines.append(f"    {state}: {count}")
         lines.append("")
         
+        # Interrupt Analysis
+        if metrics.interrupts and self.config.enable_interrupt_analysis:
+            lines.extend(self._generate_interrupt_report(metrics.interrupts))
+        
         # Top Processes
         lines.append(self.colorize("TOP PROCESSES", "blue"))
         
@@ -234,6 +238,69 @@ class TextReporter(BaseReporter):
             return 'yellow'
         else:
             return 'green'
+    
+    def _generate_interrupt_report(self, interrupts) -> List[str]:
+        """生成中断分析报告"""
+        lines = []
+        
+        lines.append(self.colorize("INTERRUPT & CONTEXT SWITCH ANALYSIS", "blue"))
+        
+        # 硬中断统计
+        lines.append(f"  Total Interrupts: {interrupts.total_interrupts:,}")
+        if interrupts.interrupt_rate:
+            rate_color = self._get_threshold_color(interrupts.interrupt_rate, self.config.max_interrupt_rate)
+            lines.append(f"  Interrupt Rate: {self.colorize(f'{interrupts.interrupt_rate:.0f}/sec', rate_color)}")
+        
+        # CPU中断分布
+        if interrupts.cpu_interrupt_distribution:
+            lines.append(f"  Hottest CPU: Core {interrupts.hottest_cpu}")
+            lines.append("  CPU Interrupt Distribution:")
+            for idx, count in enumerate(interrupts.cpu_interrupt_distribution):
+                if count > 0:
+                    is_hottest = idx == interrupts.hottest_cpu
+                    color = 'red' if is_hottest else 'white'
+                    marker = '→' if is_hottest else ' '
+                    lines.append(f"    {marker} Core {idx:2d}: {self.colorize(f'{count:,}', color)}")
+        
+        # 网卡中断热点
+        if interrupts.network_interrupts:
+            lines.append(self.colorize("  Network Interrupts:", "cyan"))
+            for net_int in interrupts.network_interrupts[:5]:  # 显示前5个
+                rate_str = f" ({net_int.rate:.0f}/sec)" if net_int.rate else ""
+                lines.append(f"    IRQ {net_int.irq_number:3d} - {net_int.device_name}: {net_int.interrupt_count:,}{rate_str}")
+                
+                # 显示中断分布
+                if net_int.cpu_distribution:
+                    dist_str = ", ".join([f"CPU{i}:{count}" for i, count in enumerate(net_int.cpu_distribution) if count > 0])
+                    if len(dist_str) > 60:
+                        dist_str = dist_str[:57] + "..."
+                    lines.append(f"      Distribution: {dist_str}")
+        
+        # ksoftirqd进程状态
+        if interrupts.ksoftirqd_processes:
+            lines.append(self.colorize("  Software Interrupt Processes:", "cyan"))
+            for softirq in interrupts.ksoftirqd_processes:
+                cpu_color = self._get_threshold_color(softirq.cpu_percent, self.config.ksoftirqd_cpu_threshold)
+                lines.append(f"    ksoftirqd/{softirq.cpu_id} (PID {softirq.ksoftirqd_pid}): {self.colorize(f'{softirq.cpu_percent:.1f}%', cpu_color)} CPU")
+                if softirq.net_rx or softirq.net_tx:
+                    lines.append(f"      NET_RX: {softirq.net_rx:,}, NET_TX: {softirq.net_tx:,}")
+        
+        # 上下文切换
+        lines.append(f"  Context Switches: {interrupts.system_context_switches:,}")
+        if interrupts.context_switch_rate:
+            rate_color = self._get_threshold_color(interrupts.context_switch_rate, self.config.max_context_switch_rate)
+            lines.append(f"  Context Switch Rate: {self.colorize(f'{interrupts.context_switch_rate:.0f}/sec', rate_color)}")
+        
+        # 高上下文切换进程
+        if interrupts.high_switch_processes:
+            lines.append(self.colorize("  High Context Switch Processes:", "cyan"))
+            for proc_cs in interrupts.high_switch_processes[:5]:  # 显示前5个
+                rate_str = f" ({proc_cs.switch_rate:.0f}/sec)" if proc_cs.switch_rate else ""
+                lines.append(f"    PID {proc_cs.pid:5d} - {proc_cs.name}: {proc_cs.total_switches:,} switches{rate_str}")
+                lines.append(f"      Voluntary: {proc_cs.voluntary_switches:,}, Non-voluntary: {proc_cs.nonvoluntary_switches:,}")
+        
+        lines.append("")
+        return lines
     
     def _format_bytes(self, bytes_value: float) -> str:
         """Format bytes in human readable format"""

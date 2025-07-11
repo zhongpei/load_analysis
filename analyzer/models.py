@@ -87,6 +87,13 @@ class AnalysisResult:
     recommendations: List[str] = field(default_factory=list)
     summary: Dict[str, Any] = field(default_factory=dict)
     
+    def add_issue(self, issue: Issue, primary: bool = True) -> None:
+        """Add an issue to the result"""
+        if primary:
+            self.primary_issues.append(issue)
+        else:
+            self.secondary_issues.append(issue)
+    
     def get_all_issues(self) -> List[Issue]:
         """Get all issues combined"""
         return self.primary_issues + self.secondary_issues

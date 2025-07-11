@@ -38,6 +38,10 @@ class Analyzer:
         self._analyze_disk_io(metrics, result)
         self._analyze_network(metrics, result)
         
+        # Analyze interrupts and context switches if available
+        if metrics.interrupts and self.config.enable_interrupt_analysis:
+            self._analyze_interrupts(metrics, result)
+        
         # Generate recommendations
         self._generate_recommendations(result)
         
@@ -300,17 +304,167 @@ class Analyzer:
                 
                 result.secondary_issues.append(issue)
     
-    def _get_severity_by_ratio(self, value: float, threshold: float, 
-                              high_multiplier: float, critical_multiplier: float) -> IssueSeverity:
-        """Determine severity based on how much value exceeds threshold"""
-        if value > threshold * critical_multiplier:
-            return IssueSeverity.CRITICAL
-        elif value > threshold * high_multiplier:
-            return IssueSeverity.HIGH
-        elif value > threshold:
-            return IssueSeverity.MEDIUM
-        else:
-            return IssueSeverity.LOW
+    def _analyze_interrupts(self, metrics: MetricsData, result: AnalysisResult) -> None:
+        """分析中断和上下文切换"""
+        if not metrics.interrupts:
+            return
+            
+        interrupts = metrics.interrupts
+        
+        # 1. 分析硬中断负载
+        if interrupts.interrupt_rate and interrupts.interrupt_rate > self.config.max_interrupt_rate:
+            result.add_issue(Issue(
+                type=IssueType.CPU,
+                severity=IssueSeverity.HIGH,
+                message=f"高中断率: {interrupts.interrupt_rate:.0f} 中断/秒 (阈值: {self.config.max_interrupt_rate})",
+                value=interrupts.interrupt_rate,
+                threshold=self.config.max_interrupt_rate,
+                recommendation="考虑优化中断处理或使用中断合并技术",
+                additional_data={
+                    "total_interrupts": interrupts.total_interrupts,
+                    "hottest_cpu": interrupts.hottest_cpu,
+                    "cpu_distribution": interrupts.cpu_interrupt_distribution
+                }
+            ))
+        
+        # 2. 分析CPU中断分布不均
+        if interrupts.cpu_interrupt_distribution:
+            cpu_avg = sum(interrupts.cpu_interrupt_distribution) / len(interrupts.cpu_interrupt_distribution)
+            max_cpu_interrupts = max(interrupts.cpu_interrupt_distribution)
+            if cpu_avg > 0 and max_cpu_interrupts > cpu_avg * 3:  # 某个CPU的中断数是平均值的3倍以上
+                result.add_issue(Issue(
+                    type=IssueType.CPU,
+                    severity=IssueSeverity.MEDIUM,
+                    message=f"CPU{interrupts.hottest_cpu} 中断负载过高: {max_cpu_interrupts} 中断 (平均: {cpu_avg:.0f})",
+                    value=max_cpu_interrupts,
+                    threshold=cpu_avg * 2,
+                    recommendation="建议使用irqbalance或手动调整中断亲和性",
+                    additional_data={
+                        "hottest_cpu": interrupts.hottest_cpu,
+                        "imbalance_ratio": max_cpu_interrupts / cpu_avg if cpu_avg > 0 else 0
+                    }
+                ))
+        
+        # 3. 分析网卡中断热点
+        for net_int in interrupts.network_interrupts:
+            if net_int.rate and net_int.rate > self.config.network_interrupt_threshold:
+                result.add_issue(Issue(
+                    type=IssueType.NETWORK,
+                    severity=IssueSeverity.MEDIUM,
+                    message=f"网卡 {net_int.device_name} 中断率过高: {net_int.rate:.0f} 中断/秒",
+                    value=net_int.rate,
+                    threshold=self.config.network_interrupt_threshold,
+                    recommendation="建议调整网卡中断合并参数或使用RSS分散负载",
+                    additional_data={
+                        "device": net_int.device_name,
+                        "irq_number": net_int.irq_number,
+                        "total_count": net_int.interrupt_count,
+                        "cpu_distribution": net_int.cpu_distribution
+                    }
+                ))
+        
+        # 4. 分析ksoftirqd进程CPU占用
+        for softirq in interrupts.ksoftirqd_processes:
+            if softirq.cpu_percent > self.config.ksoftirqd_cpu_threshold:
+                result.add_issue(Issue(
+                    type=IssueType.CPU,
+                    severity=IssueSeverity.MEDIUM,
+                    message=f"CPU{softirq.cpu_id} 软中断处理占用过高: {softirq.cpu_percent:.1f}% (ksoftirqd/{softirq.cpu_id})",
+                    value=softirq.cpu_percent,
+                    threshold=self.config.ksoftirqd_cpu_threshold,
+                    recommendation="建议检查网络流量或调整NAPI权重",
+                    additional_data={
+                        "cpu_id": softirq.cpu_id,
+                        "pid": softirq.ksoftirqd_pid,
+                        "net_rx": softirq.net_rx,
+                        "net_tx": softirq.net_tx,
+                        "total_softirq": softirq.total_softirq
+                    }
+                ))
+        
+        # 5. 分析系统级上下文切换
+        if interrupts.context_switch_rate and interrupts.context_switch_rate > self.config.max_context_switch_rate:
+            result.add_issue(Issue(
+                type=IssueType.CPU,
+                severity=IssueSeverity.HIGH,
+                message=f"高上下文切换率: {interrupts.context_switch_rate:.0f} 切换/秒 (阈值: {self.config.max_context_switch_rate})",
+                value=interrupts.context_switch_rate,
+                threshold=self.config.max_context_switch_rate,
+                recommendation="建议检查是否有大量短时间运行的进程或优化线程调度",
+                additional_data={
+                    "total_switches": interrupts.system_context_switches
+                }
+            ))
+        
+        # 6. 分析高上下文切换进程
+        for proc_cs in interrupts.high_switch_processes:
+            if proc_cs.switch_rate and proc_cs.switch_rate > self.config.high_context_switch_threshold:
+                result.add_issue(Issue(
+                    type=IssueType.PROCESS,
+                    severity=IssueSeverity.MEDIUM,
+                    message=f"进程 {proc_cs.name} (PID:{proc_cs.pid}) 上下文切换频繁: {proc_cs.switch_rate:.0f} 切换/秒",
+                    value=proc_cs.switch_rate,
+                    threshold=self.config.high_context_switch_threshold,
+                    recommendation="建议使用taskset绑定CPU或优化程序逻辑减少阻塞操作",
+                    additional_data={
+                        "pid": proc_cs.pid,
+                        "voluntary": proc_cs.voluntary_switches,
+                        "nonvoluntary": proc_cs.nonvoluntary_switches,
+                        "total": proc_cs.total_switches
+                    }
+                ))
+        
+        # 7. 添加优化建议
+        self._add_interrupt_recommendations(result, interrupts)
+    
+    def _add_interrupt_recommendations(self, result: AnalysisResult, interrupts) -> None:
+        """添加中断优化建议"""
+        recommendations = set(result.recommendations or [])
+        
+        # 中断不均衡建议
+        if interrupts.cpu_interrupt_distribution:
+            cpu_avg = sum(interrupts.cpu_interrupt_distribution) / len(interrupts.cpu_interrupt_distribution)
+            max_cpu_interrupts = max(interrupts.cpu_interrupt_distribution)
+            if cpu_avg > 0 and max_cpu_interrupts > cpu_avg * 2:
+                recommendations.add("检测到中断负载不均衡，建议启用 irqbalance 服务或手动绑定中断到多核")
+                recommendations.add(f"可以使用: echo <CPU-mask> > /proc/irq/<IRQ-number>/smp_affinity 调整中断亲和性")
+        
+        # 网卡中断优化建议
+        high_net_interrupts = [ni for ni in interrupts.network_interrupts 
+                              if ni.rate and ni.rate > self.config.network_interrupt_threshold]
+        if high_net_interrupts:
+            recommendations.add("网卡中断率较高，考虑以下优化:")
+            recommendations.add("1. 调整网卡中断合并参数 (ethtool -C)")
+            recommendations.add("2. 使用RSS (Receive Side Scaling) 分散网络负载")
+            recommendations.add("3. 考虑将网卡中断绑定到专用CPU核心")
+        
+        # ksoftirqd优化建议
+        high_softirq = [si for si in interrupts.ksoftirqd_processes 
+                       if si.cpu_percent > self.config.ksoftirqd_cpu_threshold]
+        if high_softirq:
+            recommendations.add("软中断处理负载过高，建议:")
+            recommendations.add("1. 检查网络流量是否过大")
+            recommendations.add("2. 调整网络设备的NAPI权重")
+            recommendations.add("3. 考虑使用用户态网络栈 (如DPDK)")
+        
+        # 高上下文切换建议
+        if interrupts.context_switch_rate and interrupts.context_switch_rate > self.config.max_context_switch_rate:
+            recommendations.add("系统上下文切换过于频繁，建议:")
+            recommendations.add("1. 检查是否有大量短时间运行的进程")
+            recommendations.add("2. 优化应用程序减少线程创建/销毁")
+            recommendations.add("3. 使用进程/线程池减少调度开销")
+        
+        # 高切换进程建议
+        high_switch_procs = [p for p in interrupts.high_switch_processes 
+                           if p.switch_rate and p.switch_rate > self.config.high_context_switch_threshold]
+        if high_switch_procs:
+            proc_names = [p.name for p in high_switch_procs[:3]]
+            recommendations.add(f"进程 {', '.join(proc_names)} 等上下文切换频繁，建议:")
+            recommendations.add("1. 使用 taskset 将高切换进程绑定到特定CPU核心")
+            recommendations.add("2. 检查进程是否频繁进行I/O或IPC操作")
+            recommendations.add("3. 优化程序逻辑减少阻塞操作")
+        
+        result.recommendations = list(recommendations)
     
     def _generate_recommendations(self, result: AnalysisResult) -> None:
         """Generate general recommendations based on issues"""
@@ -352,3 +506,21 @@ class Analyzer:
             'top_cpu_process': metrics.top_processes['by_cpu'][0].name if metrics.top_processes.get('by_cpu') else None,
             'top_memory_process': metrics.top_processes['by_memory'][0].name if metrics.top_processes.get('by_memory') else None
         }
+    
+    def _get_severity_by_ratio(self, value: float, threshold: float, high_threshold: Optional[float] = None, critical_threshold: Optional[float] = None) -> IssueSeverity:
+        """根据值和阈值确定问题严重程度"""
+        if high_threshold is None:
+            high_threshold = threshold * 1.2
+        if critical_threshold is None:
+            critical_threshold = threshold * 1.5
+            
+        ratio = value / threshold if threshold > 0 else 0
+        
+        if value >= critical_threshold:
+            return IssueSeverity.CRITICAL
+        elif value >= high_threshold:
+            return IssueSeverity.HIGH
+        elif value >= threshold:
+            return IssueSeverity.MEDIUM
+        else:
+            return IssueSeverity.LOW

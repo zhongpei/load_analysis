@@ -29,6 +29,14 @@ interrupts_threshold: 5000            # Interrupts per second
 disk_io_read_threshold: 104857600     # 100MB/s in bytes
 disk_io_write_threshold: 104857600    # 100MB/s in bytes
 
+# Interrupt Analysis Configuration
+enable_interrupt_analysis: true       # Enable interrupt analysis
+high_context_switch_threshold: 1000   # High context switch processes threshold
+max_interrupt_rate: 10000            # Maximum interrupt rate per second
+max_context_switch_rate: 20000       # Maximum context switch rate per second
+ksoftirqd_cpu_threshold: 10.0        # ksoftirqd CPU usage threshold (%)
+network_interrupt_threshold: 1000    # Network interrupt rate threshold
+
 # Alert Configuration
 enable_alerts: false
 alert_webhook_url: null

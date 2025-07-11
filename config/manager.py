@@ -53,6 +53,14 @@ class Config:
     disk_io_read_threshold: int = 100 * 1024 * 1024  # 100MB/s
     disk_io_write_threshold: int = 100 * 1024 * 1024  # 100MB/s
     
+    # Interrupt analysis configuration
+    enable_interrupt_analysis: bool = True
+    high_context_switch_threshold: int = 1000
+    max_interrupt_rate: int = 10000
+    max_context_switch_rate: int = 20000
+    ksoftirqd_cpu_threshold: float = 10.0
+    network_interrupt_threshold: int = 1000
+    
     # Alert configuration
     enable_alerts: bool = False
     alert_webhook_url: Optional[str] = None

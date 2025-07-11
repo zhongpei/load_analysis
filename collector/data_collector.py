@@ -17,7 +17,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import Config
 from collector.models import (
     MetricsData, LoadMetrics, CPUMetrics, MemoryMetrics, 
-    DiskIOMetrics, NetworkMetrics, ProcessInfo
+    DiskIOMetrics, NetworkMetrics, ProcessInfo,
+    InterruptMetrics, InterruptInfo, SoftIRQInfo, ContextSwitchInfo
 )
 
 
@@ -29,6 +30,9 @@ class DataCollector:
         self.previous_cpu_times = None
         self.previous_disk_io = None
         self.previous_net_io = None
+        self.previous_interrupts = None
+        self.previous_context_switches = None
+        self.previous_proc_context_switches = {}
         self.start_time = time.time()
     
     def get_load_metrics(self) -> LoadMetrics:
@@ -230,9 +234,10 @@ class DataCollector:
                 'by_cpu': self.get_top_processes('cpu_percent'),
                 'by_memory': self.get_top_processes('memory_percent'),
                 'by_io': self._get_top_io_processes()
-            }
+            },
+            interrupts=self.get_interrupt_metrics()
         )
-    
+
     def _get_proc_stat_info(self) -> Tuple[int, int]:
         """Get context switches and interrupts from /proc/stat"""
         try:
@@ -251,7 +256,7 @@ class DataCollector:
             return context_switches, interrupts
         except (IOError, ValueError):
             return 0, 0
-    
+
     def _parse_meminfo(self) -> Dict[str, int]:
         """Parse /proc/meminfo for additional memory details"""
         meminfo = {}
@@ -270,7 +275,7 @@ class DataCollector:
             pass
         
         return meminfo
-    
+
     def _get_tcp_backlog(self) -> Dict[str, int]:
         """Get TCP backlog information using ss command"""
         try:
@@ -299,7 +304,7 @@ class DataCollector:
                         break
         
         return backlog_info
-    
+
     def _get_top_io_processes(self) -> List[ProcessInfo]:
         """Get top processes by I/O activity"""
         processes = []
@@ -343,3 +348,289 @@ class DataCollector:
         # Sort by total I/O bytes
         processes.sort(key=lambda x: x.io_counters.get('total_bytes', 0) if x.io_counters else 0, reverse=True)
         return processes[:self.config.top_processes_count]
+    
+    def get_interrupt_metrics(self) -> InterruptMetrics:
+        """收集中断相关指标"""
+        current_time = time.time()
+        time_delta = current_time - self.start_time if hasattr(self, 'previous_interrupts') and self.previous_interrupts else 1.0
+        
+        # 1. 收集硬中断信息
+        interrupts_data = self._parse_proc_interrupts()
+        total_interrupts = sum(sum(cpu_counts) for cpu_counts in interrupts_data.values())
+        
+        # 计算中断率
+        interrupt_rate = None
+        if self.previous_interrupts is not None:
+            interrupt_delta = total_interrupts - self.previous_interrupts
+            interrupt_rate = interrupt_delta / time_delta if time_delta > 0 else 0
+        
+        # 2. 收集网卡中断信息
+        network_interrupts = self._get_network_interrupts(interrupts_data, time_delta)
+        
+        # 3. 计算CPU中断分布
+        cpu_interrupt_distribution = self._get_cpu_interrupt_distribution(interrupts_data)
+        hottest_cpu = cpu_interrupt_distribution.index(max(cpu_interrupt_distribution)) if cpu_interrupt_distribution else None
+        
+        # 4. 收集ksoftirqd进程信息
+        ksoftirqd_processes = self._get_ksoftirqd_processes()
+        
+        # 5. 收集上下文切换信息
+        system_context_switches, context_switch_rate = self._get_context_switches(time_delta)
+        high_switch_processes = self._get_high_context_switch_processes(time_delta)
+        
+        # 更新历史数据
+        self.previous_interrupts = total_interrupts
+        self.start_time = current_time
+        
+        return InterruptMetrics(
+            total_interrupts=total_interrupts,
+            system_context_switches=system_context_switches,
+            interrupt_rate=interrupt_rate,
+            context_switch_rate=context_switch_rate,
+            hottest_cpu=hottest_cpu,
+            network_interrupts=network_interrupts,
+            cpu_interrupt_distribution=cpu_interrupt_distribution,
+            ksoftirqd_processes=ksoftirqd_processes,
+            high_switch_processes=high_switch_processes
+        )
+    
+    def _parse_proc_interrupts(self) -> Dict[str, List[int]]:
+        """解析/proc/interrupts文件"""
+        interrupts_data = {}
+        try:
+            with open('/proc/interrupts', 'r') as f:
+                lines = f.readlines()
+                
+            for line in lines[1:]:  # 跳过标题行
+                parts = line.strip().split()
+                if not parts:
+                    continue
+                    
+                irq_name = parts[0].rstrip(':')
+                if not irq_name.isdigit():
+                    continue
+                
+                # 提取每个CPU的中断次数
+                cpu_counts = []
+                for i in range(1, len(parts)):
+                    if parts[i].isdigit():
+                        cpu_counts.append(int(parts[i]))
+                    else:
+                        break
+                
+                interrupts_data[irq_name] = cpu_counts
+                
+        except (FileNotFoundError, PermissionError):
+            pass
+            
+        return interrupts_data
+    
+    def _get_network_interrupts(self, interrupts_data: Dict[str, List[int]], time_delta: float) -> List[InterruptInfo]:
+        """获取网卡相关的中断信息"""
+        network_interrupts = []
+        
+        try:
+            with open('/proc/interrupts', 'r') as f:
+                lines = f.readlines()
+                
+            for line in lines[1:]:
+                parts = line.strip().split()
+                if not parts or not parts[0].rstrip(':').isdigit():
+                    continue
+                    
+                irq_number = int(parts[0].rstrip(':'))
+                
+                # 检查是否为网络设备中断
+                line_lower = line.lower()
+                if any(keyword in line_lower for keyword in ['eth', 'ens', 'enp', 'wlan', 'wifi']):
+                    # 提取设备名称
+                    device_name = "unknown"
+                    for part in parts:
+                        if any(keyword in part.lower() for keyword in ['eth', 'ens', 'enp', 'wlan']):
+                            device_name = part
+                            break
+                    
+                    if str(irq_number) in interrupts_data:
+                        cpu_distribution = interrupts_data[str(irq_number)]
+                        interrupt_count = sum(cpu_distribution)
+                        
+                        # 计算中断率
+                        rate = None
+                        if hasattr(self, 'previous_net_interrupts') and str(irq_number) in self.previous_net_interrupts:
+                            prev_count = self.previous_net_interrupts[str(irq_number)]
+                            rate = (interrupt_count - prev_count) / time_delta if time_delta > 0 else 0
+                        
+                        network_interrupts.append(InterruptInfo(
+                            irq_number=irq_number,
+                            device_name=device_name,
+                            interrupt_count=interrupt_count,
+                            cpu_distribution=cpu_distribution,
+                            rate=rate
+                        ))
+                        
+        except (FileNotFoundError, PermissionError):
+            pass
+            
+        # 保存当前中断计数供下次使用
+        if not hasattr(self, 'previous_net_interrupts'):
+            self.previous_net_interrupts = {}
+        for ni in network_interrupts:
+            self.previous_net_interrupts[str(ni.irq_number)] = ni.interrupt_count
+            
+        return network_interrupts
+    
+    def _get_cpu_interrupt_distribution(self, interrupts_data: Dict[str, List[int]]) -> List[int]:
+        """计算每个CPU核心的总中断数"""
+        if not interrupts_data:
+            return []
+            
+        # 确定CPU核心数
+        max_cpus = max(len(counts) for counts in interrupts_data.values()) if interrupts_data else 0
+        cpu_totals = [0] * max_cpus
+        
+        for cpu_counts in interrupts_data.values():
+            for i, count in enumerate(cpu_counts):
+                if i < len(cpu_totals):
+                    cpu_totals[i] += count
+                    
+        return cpu_totals
+    
+    def _get_ksoftirqd_processes(self) -> List[SoftIRQInfo]:
+        """获取ksoftirqd进程信息"""
+        ksoftirqd_processes = []
+        
+        try:
+            for proc in psutil.process_iter(['pid', 'name', 'cpu_percent']):
+                try:
+                    if 'ksoftirqd' in proc.info['name']:
+                        # 提取CPU ID（从进程名如 ksoftirqd/0 中提取）
+                        cpu_id = 0
+                        if '/' in proc.info['name']:
+                            try:
+                                cpu_id = int(proc.info['name'].split('/')[-1])
+                            except ValueError:
+                                pass
+                        
+                        # 获取软中断统计（从/proc/softirqs）
+                        net_rx, net_tx, total_softirq = self._get_softirq_stats(cpu_id)
+                        
+                        ksoftirqd_processes.append(SoftIRQInfo(
+                            cpu_id=cpu_id,
+                            ksoftirqd_pid=proc.info['pid'],
+                            ksoftirqd_name=proc.info['name'],
+                            cpu_percent=proc.info['cpu_percent'] or 0.0,
+                            net_rx=net_rx,
+                            net_tx=net_tx,
+                            total_softirq=total_softirq
+                        ))
+                        
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+                    
+        except Exception:
+            pass
+            
+        return ksoftirqd_processes
+    
+    def _get_softirq_stats(self, cpu_id: int) -> tuple:
+        """从/proc/softirqs获取软中断统计"""
+        net_rx = net_tx = total_softirq = 0
+        
+        try:
+            with open('/proc/softirqs', 'r') as f:
+                lines = f.readlines()
+                
+            for line in lines[1:]:  # 跳过标题行
+                parts = line.strip().split()
+                if not parts:
+                    continue
+                    
+                softirq_name = parts[0].rstrip(':')
+                if cpu_id + 1 < len(parts) and parts[cpu_id + 1].isdigit():
+                    count = int(parts[cpu_id + 1])
+                    total_softirq += count
+                    
+                    if 'NET_RX' in softirq_name:
+                        net_rx = count
+                    elif 'NET_TX' in softirq_name:
+                        net_tx = count
+                        
+        except (FileNotFoundError, PermissionError):
+            pass
+            
+        return net_rx, net_tx, total_softirq
+    
+    def _get_context_switches(self, time_delta: float) -> tuple:
+        """获取系统级上下文切换信息"""
+        system_context_switches = 0
+        context_switch_rate = None
+        
+        try:
+            with open('/proc/stat', 'r') as f:
+                for line in f:
+                    if line.startswith('ctxt'):
+                        system_context_switches = int(line.split()[1])
+                        break
+                        
+            # 计算上下文切换率
+            if self.previous_context_switches is not None:
+                switch_delta = system_context_switches - self.previous_context_switches
+                context_switch_rate = switch_delta / time_delta if time_delta > 0 else 0
+                
+            self.previous_context_switches = system_context_switches
+            
+        except (FileNotFoundError, PermissionError):
+            pass
+            
+        return system_context_switches, context_switch_rate
+    
+    def _get_high_context_switch_processes(self, time_delta: float) -> List[ContextSwitchInfo]:
+        """获取高上下文切换的进程"""
+        high_switch_processes = []
+        
+        try:
+            for proc in psutil.process_iter(['pid', 'name']):
+                try:
+                    # 读取进程的上下文切换信息
+                    with open(f'/proc/{proc.info["pid"]}/status', 'r') as f:
+                        voluntary_switches = nonvoluntary_switches = 0
+                        
+                        for line in f:
+                            if line.startswith('voluntary_ctxt_switches:'):
+                                voluntary_switches = int(line.split()[1])
+                            elif line.startswith('nonvoluntary_ctxt_switches:'):
+                                nonvoluntary_switches = int(line.split()[1])
+                    
+                    total_switches = voluntary_switches + nonvoluntary_switches
+                    
+                    # 计算切换率
+                    switch_rate = None
+                    pid_str = str(proc.info['pid'])
+                    if pid_str in self.previous_proc_context_switches:
+                        prev_total = self.previous_proc_context_switches[pid_str]
+                        switch_rate = (total_switches - prev_total) / time_delta if time_delta > 0 else 0
+                    
+                    # 只记录高切换率的进程（阈值可配置）
+                    threshold = getattr(self.config, 'high_context_switch_threshold', 1000)
+                    if switch_rate is None or switch_rate > threshold / time_delta:
+                        high_switch_processes.append(ContextSwitchInfo(
+                            pid=proc.info['pid'],
+                            name=proc.info['name'],
+                            voluntary_switches=voluntary_switches,
+                            nonvoluntary_switches=nonvoluntary_switches,
+                            total_switches=total_switches,
+                            switch_rate=switch_rate
+                        ))
+                    
+                    # 保存当前值供下次使用
+                    self.previous_proc_context_switches[pid_str] = total_switches
+                    
+                except (psutil.NoSuchProcess, psutil.AccessDenied, FileNotFoundError, PermissionError):
+                    continue
+                    
+        except Exception:
+            pass
+            
+        # 按切换率排序，返回top N
+        high_switch_processes.sort(key=lambda x: x.switch_rate or 0, reverse=True)
+        return high_switch_processes[:10]  # 返回前10个高切换进程
