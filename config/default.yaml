@@ -1,0 +1,45 @@
+# Load Analyzer Default Configuration
+
+# Sampling Configuration
+sample_interval: 1        # Sampling interval in seconds
+sample_count: 1          # Number of samples to collect
+output_format: "text"    # Output format: text, json, csv, html, markdown
+output_file: null        # Output file path (null for stdout)
+enable_colors: true      # Enable colored terminal output
+
+# Load & CPU Thresholds
+load_threshold_multiplier: 1.5  # Load threshold = CPU cores * multiplier
+cpu_threshold: 80.0             # CPU usage threshold (%)
+iowait_threshold: 30.0          # I/O wait threshold (%)
+
+# Memory Thresholds
+memory_threshold: 80.0   # Memory usage threshold (%)
+swap_threshold: 50.0     # Swap usage threshold (%)
+
+# Network Thresholds
+tcp_connections_threshold: 1000  # TCP connections threshold
+tcp_backlog_threshold: 100       # TCP backlog threshold
+
+# Process Analysis
+top_processes_count: 10  # Number of top processes to show
+
+# Advanced Thresholds
+context_switches_threshold: 10000     # Context switches per second
+interrupts_threshold: 5000            # Interrupts per second
+disk_io_read_threshold: 104857600     # 100MB/s in bytes
+disk_io_write_threshold: 104857600    # 100MB/s in bytes
+
+# Alert Configuration
+enable_alerts: false
+alert_webhook_url: null
+alert_slack_token: null
+alert_slack_channel: null
+
+# Prometheus Exporter
+enable_prometheus: false
+prometheus_port: 8000
+
+# Data Retention
+enable_history: false
+history_file: null
+history_retention_days: 7

@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "load-analyzer"
+version = "1.0.0"
+description = "Enhanced Linux system load analyzer"
+authors = [{name = "Load Analyzer Team", email = "team@example.com"}]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: System :: Monitoring",
+]
+
+dependencies = [
+    "psutil>=5.8.0",
+    "PyYAML>=6.0",
+    "rich>=12.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=22.0",
+    "flake8>=5.0",
+    "mypy>=1.0",
+]
+
+[project.scripts]
+load-analyzer = "load_analyzer.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/example/load-analyzer"
+Repository = "https://github.com/example/load-analyzer.git"
+Issues = "https://github.com/example/load-analyzer/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["load_analyzer*"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--cov=load_analyzer --cov-report=term-missing"
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
